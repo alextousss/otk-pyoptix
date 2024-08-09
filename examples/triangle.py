@@ -37,7 +37,7 @@ class Logger:
 
 def log_callback( level, tag, mssg ):
     print( "[{:>2}][{:>12}]: {}".format( level, tag, mssg ) )
-    
+
 
 def round_up( val, mult_of ):
     return val if val % mult_of == 0 else val + mult_of - val % mult_of 
@@ -52,7 +52,7 @@ def  get_aligned_itemsize( formats, alignment ):
         'names'   : names,
         'formats' : formats, 
         'align'   : True
-        } )
+    } )
     return round_up( temp_dtype.itemsize, alignment )
 
 
@@ -82,7 +82,7 @@ def compile_cuda( cuda_file ):
         nvrtc_dll = ''
     print("NVRTC_DLL = {}".format(nvrtc_dll))
     prog = Program( src.decode(), cuda_file,
-                    lib_name= nvrtc_dll )
+                   lib_name= nvrtc_dll )
     compile_options = [
         '-use_fast_math', 
         '-lineinfo',
@@ -127,36 +127,35 @@ def create_ctx():
     # which stores any data needed
     global logger
     logger = Logger()
-    
+
     # OptiX param struct fields can be set with optional
     # keyword constructor arguments.
     ctx_options = optix.DeviceContextOptions( 
-            logCallbackFunction = logger,
-            logCallbackLevel    = 4
-            )
+        logCallbackFunction = logger,
+        logCallbackLevel    = 4
+    )
 
     # They can also be set and queried as properties on the struct
-    if optix.version()[1] >= 2:
-        ctx_options.validationMode = optix.DEVICE_CONTEXT_VALIDATION_MODE_ALL 
+    ctx_options.validationMode = optix.DEVICE_CONTEXT_VALIDATION_MODE_ALL 
 
     cu_ctx = 0 
     return optix.deviceContextCreate( cu_ctx, ctx_options )
 
 
 def create_accel( ctx ):
-        
+
     accel_options = optix.AccelBuildOptions(
         buildFlags = int( optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS),
         operation  = optix.BUILD_OPERATION_BUILD
-        )
+    )
 
     global vertices
     vertices = cp.array( [
-       -0.5, -0.5, 0.0,
+        -0.5, -0.5, 0.0,
         0.5, -0.5, 0.0,
         0.0,  0.5, 0.0 
-        ], dtype = 'f4')
-        
+    ], dtype = 'f4')
+
     triangle_input_flags = [ optix.GEOMETRY_FLAG_NONE ]
     triangle_input = optix.BuildInputTriangleArray()
     triangle_input.vertexFormat  = optix.VERTEX_FORMAT_FLOAT3
@@ -164,12 +163,12 @@ def create_accel( ctx ):
     triangle_input.vertexBuffers = [ vertices.data.ptr ]
     triangle_input.flags         = triangle_input_flags
     triangle_input.numSbtRecords = 1;
-        
+
     gas_buffer_sizes = ctx.accelComputeMemoryUsage( [accel_options], [triangle_input] )
 
     d_temp_buffer_gas   = cp.cuda.alloc( gas_buffer_sizes.tempSizeInBytes )
     d_gas_output_buffer = cp.cuda.alloc( gas_buffer_sizes.outputSizeInBytes)
-    
+
     gas_handle = ctx.accelBuild( 
         0,    # CUDA stream
         [ accel_options ],
@@ -179,35 +178,144 @@ def create_accel( ctx ):
         d_gas_output_buffer.ptr,
         gas_buffer_sizes.outputSizeInBytes,
         [] # emitted properties
-        )
+    )
 
     return (gas_handle, d_gas_output_buffer)
 
 
+class AccelState:
+    def __init__(self, ctx):
+        self.accel_options = optix.AccelBuildOptions(
+            buildFlags = int(optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS | optix.BUILD_FLAG_ALLOW_UPDATE),
+            operation  = optix.BUILD_OPERATION_BUILD
+        )
+        self.vertices = cp.array( [
+            -0.2, -0.2, 0.1, 
+             0.2, -0.2, 0.1, 
+             0.0, 0.2, 0.1,
+
+            -0.2, -0.1, -0.1, 
+             0.2, -0.1, -0.1, 
+             0.0, 0.3,  -0.1,
+
+            -0.2, 0.0, 0.2, 
+             0.2, 0.0, 0.2, 
+             0.0, 0.4, 0.2,
+
+            -0.1, -0.2, 0.3, 
+             0.3, -0.2, 0.3, 
+             0.1, 0.2, 0.3,
+
+            -0.1, -0.1, 0.4, 
+             0.3, -0.1, 0.5, 
+             0.1, 0.3, 0.5,
+
+            -0.1, 0.0, 0.6, 
+             0.3, 0.0, 0.6, 
+             0.1, 0.4, 0.6,
+
+            0.0, -0.2, 0.7, 
+             0.4, -0.2, 0.7, 
+             0.2, 0.2, 0.7,
+
+            0.0, -0.1, 0.8, 
+             0.4, -0.1, 0.8, 
+             0.2, 0.3, 0.8,
+
+            0.0, 0.0, 0.9, 
+             0.4, 0.0, 0.9, 
+             0.2, 0.4, 0.9,
+
+
+        ], dtype = 'f4')
+
+
+
+        self.triangle_input_flags = [ optix.GEOMETRY_FLAG_NONE, optix.GEOMETRY_FLAG_DISABLE_ANYHIT ]
+        self.triangle_input = optix.BuildInputTriangleArray()
+        self.triangle_input.vertexFormat  = optix.VERTEX_FORMAT_FLOAT3
+        self.triangle_input.numVertices   = len( self.vertices )
+        self.triangle_input.vertexBuffers = [ self.vertices.data.ptr ]
+        self.triangle_input.flags         = self.triangle_input_flags
+        self.triangle_input.numSbtRecords = 1
+
+        self.gas_buffer_sizes = ctx.accelComputeMemoryUsage( [self.accel_options], [self.triangle_input] )
+
+        self.d_temp_buffer_gas   = cp.cuda.alloc( self.gas_buffer_sizes.tempSizeInBytes )
+        self.d_gas_output_buffer = cp.cuda.alloc( self.gas_buffer_sizes.outputSizeInBytes)
+
+        self.gas_handle = ctx.accelBuild( 
+            0,    # CUDA stream
+            [ self.accel_options ],
+            [ self.triangle_input ],
+            self.d_temp_buffer_gas.ptr,
+            self.gas_buffer_sizes.tempSizeInBytes,
+            self.d_gas_output_buffer.ptr,
+            self.gas_buffer_sizes.outputSizeInBytes,
+            [] # emitted properties
+        )
+        #return (gas_handle, d_gas_output_buffer)
+        cp.cuda.runtime.deviceSynchronize()
+
+    def update(self, ctx):
+        """
+        Tried rebuilding most steps and reallocating the buffers with the following lines.
+        This did not help and the issue was the same.
+
+
+        self.accel_options = optix.AccelBuildOptions(
+            buildFlags = int(optix.BUILD_FLAG_ALLOW_RANDOM_VERTEX_ACCESS | optix.BUILD_FLAG_ALLOW_UPDATE),
+            operation  = optix.BUILD_OPERATION_UPDATE
+        )
+
+        self.triangle_input_flags = [ optix.GEOMETRY_FLAG_NONE, optix.GEOMETRY_FLAG_DISABLE_ANYHIT ]
+        self.triangle_input = optix.BuildInputTriangleArray()
+        self.triangle_input.vertexFormat  = optix.VERTEX_FORMAT_FLOAT3
+        self.triangle_input.numVertices   = len( self.vertices )
+        self.triangle_input.vertexBuffers = [ self.vertices.data.ptr ]
+        self.triangle_input.flags         = self.triangle_input_flags
+        self.triangle_input.numSbtRecords = 1
+
+
+
+        self.gas_buffer_sizes = ctx.accelComputeMemoryUsage( [self.accel_options], [self.triangle_input] )
+
+        self.d_temp_buffer_gas   = cp.cuda.alloc( self.gas_buffer_sizes.tempUpdateSizeInBytes )
+        """
+
+
+
+        self.gas_handle = ctx.accelBuild( 
+            0,    # CUDA stream
+            [ self.accel_options ],
+            [ self.triangle_input ],
+            self.d_temp_buffer_gas.ptr,
+            self.gas_buffer_sizes.tempUpdateSizeInBytes,
+            self.d_gas_output_buffer.ptr,
+            self.gas_buffer_sizes.outputSizeInBytes,
+            [] # emitted properties
+        )
+
+        cp.cuda.runtime.deviceSynchronize()
+
+
+
+
+
 def set_pipeline_options():
-    if optix.version()[1] >= 2:
-        return optix.PipelineCompileOptions(
-            usesMotionBlur         = False,
-            traversableGraphFlags  = int( optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS ),
-            numPayloadValues       = 3,
-            numAttributeValues     = 3,
-            exceptionFlags         = int( optix.EXCEPTION_FLAG_NONE ),
-            pipelineLaunchParamsVariableName = "params",
-            usesPrimitiveTypeFlags = optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
-        )
-    else:
-        return optix.PipelineCompileOptions(
-            usesMotionBlur         = False,
-            traversableGraphFlags  = int( optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS ),
-            numPayloadValues       = 3,
-            numAttributeValues     = 3,
-            exceptionFlags         = int( optix.EXCEPTION_FLAG_NONE ),
-            pipelineLaunchParamsVariableName = "params"
-        )
+    return optix.PipelineCompileOptions(
+        usesMotionBlur         = False,
+        traversableGraphFlags  = int( optix.TRAVERSABLE_GRAPH_FLAG_ALLOW_SINGLE_GAS ),
+        numPayloadValues       = 3,
+        numAttributeValues     = 3,
+        exceptionFlags         = int( optix.EXCEPTION_FLAG_NONE ),
+        pipelineLaunchParamsVariableName = "params",
+        usesPrimitiveTypeFlags = optix.PRIMITIVE_TYPE_FLAGS_TRIANGLE
+    )
 
 def create_module( ctx, pipeline_options, triangle_ptx ):
     print( "Creating optix module ..." )
-    
+
 
     module_options = optix.ModuleCompileOptions(
         maxRegisterCount = optix.COMPILE_DEFAULT_MAX_REGISTER_COUNT,
@@ -216,10 +324,10 @@ def create_module( ctx, pipeline_options, triangle_ptx ):
     )
 
     module, log = ctx.moduleCreate(
-            module_options,
-            pipeline_options,
-            triangle_ptx
-            )
+        module_options,
+        pipeline_options,
+        triangle_ptx
+    )
     print( "\tModule create log: <<<{}>>>".format( log ) )
     return module
 
@@ -232,16 +340,16 @@ def create_program_groups( ctx, module ):
     raygen_prog_group_desc.raygenEntryFunctionName  = "__raygen__rg"
     raygen_prog_group, log = ctx.programGroupCreate(
         [ raygen_prog_group_desc ]
-        )
+    )
     print( "\tProgramGroup raygen create log: <<<{}>>>".format( log ) )
-    
+
     miss_prog_group_desc                        = optix.ProgramGroupDesc()
     miss_prog_group_desc.missModule             = module
     miss_prog_group_desc.missEntryFunctionName  = "__miss__ms"
     program_group_options = optix.ProgramGroupOptions() 
     miss_prog_group, log = ctx.programGroupCreate(
         [ miss_prog_group_desc ]
-        )
+    )
     print( "\tProgramGroup miss create log: <<<{}>>>".format( log ) )
 
     hitgroup_prog_group_desc                             = optix.ProgramGroupDesc()
@@ -249,7 +357,7 @@ def create_program_groups( ctx, module ):
     hitgroup_prog_group_desc.hitgroupEntryFunctionNameCH = "__closesthit__ch"
     hitgroup_prog_group, log = ctx.programGroupCreate(
         [ hitgroup_prog_group_desc ]
-        )
+    )
     print( "\tProgramGroup hitgroup create log: <<<{}>>>".format( log ) )
 
     return [ raygen_prog_group[0], miss_prog_group[0], hitgroup_prog_group[0] ]
@@ -258,16 +366,16 @@ def create_program_groups( ctx, module ):
 def create_pipeline( ctx, program_groups, pipeline_compile_options ):
     print( "Creating pipeline ... " )
 
-    max_trace_depth  = 1
+    max_trace_depth  = 10
     pipeline_link_options               = optix.PipelineLinkOptions() 
     pipeline_link_options.maxTraceDepth = max_trace_depth
 
     log = ""
     pipeline = ctx.pipelineCreate(
-            pipeline_compile_options,
-            pipeline_link_options,
-            program_groups,
-            log)
+        pipeline_compile_options,
+        pipeline_link_options,
+        program_groups,
+        log)
 
     stack_sizes = optix.StackSizes()
     for prog_group in program_groups:
@@ -280,16 +388,16 @@ def create_pipeline( ctx, program_groups, pipeline_compile_options ):
         optix.util.computeStackSizes( 
             stack_sizes, 
             max_trace_depth,
-            0,  # maxCCDepth
-            0   # maxDCDepth
-            )
-    
+            1,  # maxCCDepth
+            1   # maxDCDepth
+        )
+
     pipeline.setStackSize( 
-            dc_stack_size_from_trav,
-            dc_stack_size_from_state, 
-            cc_stack_size,
-            1  # maxTraversableDepth
-            )
+        dc_stack_size_from_trav,
+        dc_stack_size_from_state, 
+        cc_stack_size,
+        1  # maxTraversableDepth
+    )
 
     return pipeline
 
@@ -314,12 +422,12 @@ def create_sbt( prog_groups ):
         'formats' : formats, 
         'itemsize': itemsize,
         'align'   : True
-        } )
+    } )
     h_raygen_sbt = np.array( [ 0 ], dtype=dtype )
     optix.sbtRecordPackHeader( raygen_prog_group, h_raygen_sbt )
     global d_raygen_sbt 
     d_raygen_sbt = array_to_device_memory( h_raygen_sbt )
-    
+
     #
     # miss record
     #
@@ -330,12 +438,12 @@ def create_sbt( prog_groups ):
         'formats' : formats,
         'itemsize': itemsize,
         'align'   : True
-        } )
+    } )
     h_miss_sbt = np.array( [ (0, 0.3, 0.1, 0.2) ], dtype=dtype )
     optix.sbtRecordPackHeader( miss_prog_group, h_miss_sbt )
     global d_miss_sbt 
     d_miss_sbt = array_to_device_memory( h_miss_sbt )
-    
+
     #
     # hitgroup record
     #
@@ -346,12 +454,12 @@ def create_sbt( prog_groups ):
         'formats' : formats,
         'itemsize': itemsize,
         'align'   : True
-        } )
+    } )
     h_hitgroup_sbt = np.array( [ (0) ], dtype=dtype )
     optix.sbtRecordPackHeader( hitgroup_prog_group, h_hitgroup_sbt )
     global d_hitgroup_sbt
     d_hitgroup_sbt = array_to_device_memory( h_hitgroup_sbt )
-    
+
     return optix.ShaderBindingTable(
         raygenRecord                = d_raygen_sbt.ptr,
         missRecordBase              = d_miss_sbt.ptr,
@@ -367,7 +475,7 @@ def launch( pipeline, sbt, trav_handle ):
     print( "Launching ... " )
 
     pix_bytes  = pix_width*pix_height*4
-    
+
     h_pix = np.zeros( (pix_width,pix_height,4), 'B' )
     h_pix[0:pix_width, 0:pix_height] = [255, 128, 0, 255]
     d_pix = cp.array( h_pix )
@@ -384,14 +492,14 @@ def launch( pipeline, sbt, trav_handle ):
         ( 'f4', 'cam_U_y',      0              ),
         ( 'f4', 'cam_U_z',      0              ),
         ( 'f4', 'cam_V_x',      0              ),
-        ( 'f4', 'cam_V_y',      0.828427       ),
+        ( 'f4', 'cam_V_y',      2.20       ),
         ( 'f4', 'cam_V_z',      0              ),
         ( 'f4', 'cam_W_x',      0              ),
         ( 'f4', 'cam_W_y',      0              ),
         ( 'f4', 'cam_W_z',      -2.0           ),
         ( 'u8', 'trav_handle',  trav_handle    )
     ]
-    
+
     formats = [ x[0] for x in params ] 
     names   = [ x[1] for x in params ] 
     values  = [ x[2] for x in params ] 
@@ -401,7 +509,7 @@ def launch( pipeline, sbt, trav_handle ):
         'formats' : formats,
         'itemsize': itemsize,
         'align'   : True
-        } )
+    } )
     h_params = np.array( [ tuple(values) ], dtype=params_dtype )
     d_params = array_to_device_memory( h_params )
 
@@ -415,7 +523,7 @@ def launch( pipeline, sbt, trav_handle ):
         pix_width,
         pix_height,
         1 # depth
-        )
+    )
 
     stream.synchronize()
 
@@ -435,14 +543,19 @@ def main():
     triangle_ptx = compile_cuda( triangle_cu )
 
     ctx              = create_ctx()
-    gas_handle, d_gas_output_buffer = create_accel(ctx)
+    # gas_handle, d_gas_output_buffer = create_accel(ctx)
+    accel_state      = AccelState(ctx)
     pipeline_options = set_pipeline_options()
     module           = create_module( ctx, pipeline_options, triangle_ptx )
     prog_groups      = create_program_groups( ctx, module )
     pipeline         = create_pipeline( ctx, prog_groups, pipeline_options )
     sbt              = create_sbt( prog_groups ) 
-    pix              = launch( pipeline, sbt, gas_handle ) 
-
+    pix              = launch( pipeline, sbt, accel_state.gas_handle ) 
+    #accel_state.update(ctx)
+    pix              = launch( pipeline, sbt, accel_state.gas_handle ) 
+    #accel_state.update(ctx)
+    pix              = launch( pipeline, sbt, accel_state.gas_handle ) 
+    
     print( "Total number of log messages: {}".format( logger.num_mssgs ) )
 
     pix = pix.reshape( ( pix_height, pix_width, 4 ) )     # PIL expects [ y, x ] resolution
